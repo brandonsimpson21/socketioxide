@@ -1,5 +1,5 @@
 use std::borrow::Cow;
-use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::{Arc, Mutex, RwLock};
 
 use engineioxide::handler::EngineIoHandler;
@@ -19,10 +19,35 @@ use crate::{
     SocketIoConfig,
 };
 
+struct ClientNs<A: Adapter> {
+    paths: HashSet<Cow<'static, str>>,
+    routes: matchit::Router<Arc<Namespace<A>>>,
+}
+
+impl<A> std::fmt::Debug for ClientNs<A>
+where
+    A: Adapter,
+{
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ClientNs")
+            .field("paths", &self.paths)
+            .finish()
+    }
+}
+
+impl<A: Adapter> ClientNs<A> {
+    pub fn get_all_namespaces(&self) -> Vec<Arc<Namespace<A>>> {
+        self.paths
+            .iter()
+            .filter_map(|ns| self.routes.at(&ns).map(|ns| ns.value.clone()).ok())
+            .collect()
+    }
+}
+
 #[derive(Debug)]
 pub struct Client<A: Adapter> {
     pub(crate) config: Arc<SocketIoConfig>,
-    ns: RwLock<HashMap<Cow<'static, str>, Arc<Namespace<A>>>>,
+    ns: RwLock<ClientNs<A>>,
 }
 
 impl<A: Adapter> Client<A> {
@@ -32,7 +57,10 @@ impl<A: Adapter> Client<A> {
 
         Self {
             config,
-            ns: RwLock::new(HashMap::new()),
+            ns: RwLock::new(ClientNs {
+                paths: HashSet::new(),
+                routes: matchit::Router::new(),
+            }),
         }
     }
 
@@ -110,18 +138,26 @@ impl<A: Adapter> Client<A> {
         #[cfg(feature = "tracing")]
         tracing::debug!("adding namespace {}", path);
         let ns = Namespace::new(path.clone(), callback);
-        self.ns.write().unwrap().insert(path, ns);
+        let mut guard = self.ns.write().unwrap();
+        guard.paths.insert(path.clone());
+        let _ = guard.routes.insert(path, ns);
     }
 
     /// Deletes a namespace handler
     pub fn delete_ns(&self, path: &str) {
         #[cfg(feature = "tracing")]
         tracing::debug!("deleting namespace {}", path);
-        self.ns.write().unwrap().remove(path);
+        self.ns.write().unwrap().paths.remove(path);
     }
 
     pub fn get_ns(&self, path: &str) -> Option<Arc<Namespace<A>>> {
-        self.ns.read().unwrap().get(path).cloned()
+        self.ns
+            .read()
+            .unwrap()
+            .routes
+            .at(path)
+            .map(|ns| ns.value.clone())
+            .ok()
     }
 
     /// Closes all engine.io connections and all clients
@@ -129,8 +165,15 @@ impl<A: Adapter> Client<A> {
     pub(crate) async fn close(&self) {
         #[cfg(feature = "tracing")]
         tracing::debug!("closing all namespaces");
-        let ns = self.ns.read().unwrap().clone();
-        futures::future::join_all(ns.values().map(|ns| ns.close())).await;
+        futures::future::join_all(
+            self.ns
+                .read()
+                .unwrap()
+                .get_all_namespaces()
+                .iter()
+                .map(|ns| ns.close()),
+        )
+        .await;
         #[cfg(feature = "tracing")]
         tracing::debug!("all namespaces closed");
     }
@@ -178,7 +221,8 @@ impl<A: Adapter> EngineIoHandler for Client<A> {
             .ns
             .read()
             .unwrap()
-            .values()
+            .get_all_namespaces()
+            .iter()
             .filter_map(|ns| ns.get_socket(socket.id).ok())
             .map(|s| s.close(reason.clone().into()))
             .collect();

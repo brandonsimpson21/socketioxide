@@ -353,6 +353,60 @@ impl<A: Adapter> FromDisconnectParts<A> for DisconnectReason {
     }
 }
 
+/// Extracts the path parameters from the request
+/// the parameter should be the last path EG /user/:id
+pub struct Path(pub String);
+
+impl From<&str> for Path {
+    fn from(s: &str) -> Self {
+        Self(s.to_string())
+    }
+}
+
+impl Path {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+
+    fn parse_param(full_path: &str) -> Result<Self, Infallible> {
+        Ok(full_path
+            .chars()
+            .rev()
+            .take_while(|c| *c != '/')
+            .collect::<String>()
+            .as_str()
+            .into())
+    }
+}
+
+impl<A: Adapter> FromConnectParts<A> for Path {
+    type Error = Infallible;
+    fn from_connect_parts(s: &Arc<Socket<A>>, _: &Option<String>) -> Result<Self, Infallible> {
+        Path::parse_param(s.req_parts().uri.path())
+    }
+}
+
+impl<A: Adapter> FromDisconnectParts<A> for Path {
+    type Error = Infallible;
+
+    fn from_disconnect_parts(s: &Arc<Socket<A>>, _: DisconnectReason) -> Result<Self, Self::Error> {
+        Path::parse_param(s.req_parts().uri.path())
+    }
+}
+
+impl<A: Adapter> FromMessageParts<A> for Path {
+    type Error = Infallible;
+
+    fn from_message_parts(
+        s: &Arc<Socket<A>>,
+        _: &mut Value,
+        _: &mut Vec<Vec<u8>>,
+        _: &Option<i64>,
+    ) -> Result<Self, Self::Error> {
+        Path::parse_param(s.req_parts().uri.path())
+    }
+}
+
 #[cfg(feature = "state")]
 mod state_extract {
     use super::*;
